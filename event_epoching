@@ -1,0 +1,130 @@
+%% Event epoching of playback ASSR data
+
+% Usage: to match sync with trigger signal, get stim onset timepoint, calc ERP.
+% 
+% 1. Trigger signal: last channel of EEG.data(end,:);, is not actual EEG data, is voltage signal got directly from USV speaker.
+% 2. Get onset timepoint: 
+% 3. Calculate Event-Related-Potential:
+% 4. Visualization
+
+% Last updated: 2023-09-14 R
+
+%% Load stimulus info & cbrain data
+% load trialInfo
+song_name = "test_6_pulses(3k-5k-sq_up-song-sq_down)-trialInfo.mat"
+load( song_name )
+% load EEG 
+load 'data/eeg_002.mat'
+
+% cond = 1, soa = 0.3 
+% cond = 2, soa = 0.5
+% cond = 3, soa = 0.7
+% cond = 4, soa = 0.9
+% cond = 5, BEEP (5000 Hz, duration 1 sec)
+% cond = 6, Square sound (ㄴㅇㄱ), not used for analysis
+
+%% Manaul detection
+
+% load matfile, make sure that trigger data was not filtered or smoothed
+clf
+trig = EEG.data(5,:);                                 % the last channel of EEG.data is trigger signal from the USV speaker.  
+plot(trig); hold on;                                    % visualize total data
+%trig(1    :10129) = 0;                                  % manually make data 0 unless it is valid signal
+%trig(1429040:end) = 0;                                  
+plot(trig);                                             % visualize valid data
+EEG_fname = hb_clearunderscore(sprintf(EEG.fname(1:end-4)));
+title(EEG_fname)
+
+%% Get onset time
+
+tois = 1:length(EEG.times);                             % time index
+t_trig = EEG.times(tois);                               % actual time (unit: sec)
+
+trig_proc = [0,diff( trig(tois) )];                     % diff (trig_proc: trigger_processed)
+trig_proc = abs(trig_proc);                             % abs 
+trig_proc = smooth( trig_proc, 5) ;                     % smooth
+
+ths = .35;                                              % beep sound yaxis threshold
+trig_proc_binary = trig_proc>ths;                       % make it 0 or 1
+
+jump_unit = 4 * EEG.srate;                              % jump by 4 sec                
+search_index = 1;                                       % start with index = 1
+beep_onset = [];
+initial_skip_duration = 10;                             % 10 seconds to skip at the beginning
+
+while search_index < length(trig_proc)                  % search index가 trig_proc보다 짧을 때까지만 도는 loop 생성
+    search_index = search_index + 1;
+    
+    % Skip the initial 10 seconds
+    if t_trig(search_index) <= initial_skip_duration
+        continue;
+    end
+    
+    if trig_proc_binary(search_index) == 1              % search index에 해당하는 binary 값이 1일 때
+        beep_onset = [beep_onset, search_index];        % beep onset matrix에 기존 matrix에 추가해서 해당
+        search_index = search_index + jump_unit;        % 다음 search index는 jump unit 4 sec * 1024 만큼 더함
+    end
+end
+beep_onset_cbrain = EEG.times(beep_onset);              % 모든 trial의 beep onset에 해당하는 actual time point data matrix. Note: 앞 & 뒤 안 자른 전체 데이터에서의 시간임 (sec)
+
+disp(sprintf(' \n number of total trials = %d \n', length(beep_onset_cbrain)))
+
+clf
+plot(t_trig, trig, 'k-');
+hold on
+plot(t_trig(beep_onset), trig_proc(beep_onset), 'rx' ); % trig total data 위에 trig onset rx 표시                      
+
+%% ERP calc.
+
+epoch_win = [-1 5.0];
+epoch = [];
+for trialIdx = 1:length(beep_onset_cbrain)                         % 모든 trial 
+    epoch_win_trial = (epoch_win(1)*EEG.srate) + (beep_onset(trialIdx)+1) : (epoch_win(2)*EEG.srate) + (beep_onset(trialIdx)); % onset -1 to +5sec = 총 6 sec
+    epoch(:,:,trialIdx) = EEG.data(1:3, epoch_win_trial);            % zerofilt( , 1, 200, EEG.srate)'; % epoch(chan,data,trialIdx)
+end
+t_epoch = linspace( epoch_win(1), epoch_win(2), size( epoch, 2) ); % -1 ~ +5 6144개로 나눠서 표현
+
+% cut outliers
+
+trial_fluctuation = squeeze(nanmean(nanstd( epoch, 0, 2)));        % 180x1 double = trial 별 EEG power?
+threshold = nanmedian(trial_fluctuation)+nanstd(trial_fluctuation)*1.96;
+bad_trials = find(trial_fluctuation > threshold);
+epoch_clean = epoch;
+epoch_clean(:,:,bad_trials) = nan;
+
+%% Visualization 2. ERP plot
+clf
+for cond = 1:6
+    figure(cond); clf; set(gcf, 'Position', [439 339 444 235], 'Color', [1 1 1])
+%     subplot(6,1,cond); hold off;
+    soa_list = [0.3 0.5 0.7 0.9]; % second
+
+    epoch_cond = epoch_clean(1:3,:,find(trialInfo.trial_list==cond));
+
+    erp = nanmean( epoch_cond, 3);
+    plot_multichan(t_epoch, erp);
+     ylim([-1 1]*.2)
+    hold on;
+    
+    ylims=ylim;
+    box_jari = ylims(2)-0.01;
+    plot(0, box_jari, 'bs', 'MarkerFaceColor', 'k', 'MarkerSize', 10)
+% 
+    if cond < 5
+        for sylIdx = 1:4
+            plot(soa_list(cond)*sylIdx, box_jari, 'ks', 'MarkerFaceColor', 'k', 'MarkerSize', 10)
+        end
+    end
+end
+
+ERP.data = erp;
+ERP.trialInfo = song_name;
+ERP.t_epoch = t_epoch
+ERP.epoch_clean = epoch_clean;
+ERP.beep_onset = beep_onset;
+
+
+
+
+
+save (sprintf('erp_%03d.mat', trialIdx), "ERP" )
